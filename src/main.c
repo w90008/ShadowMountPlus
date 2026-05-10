@@ -500,6 +500,8 @@ int main(void) {
   cleanup_staged_mount_links();
   log_debug("[STARTUP] cleanup_duplicate_title_mounts begin");
   cleanup_duplicate_title_mounts();
+  if (!app_db_run_startup_maintenance())
+    log_debug("  [DB] startup snd0info maintenance unavailable");
   log_debug("[STARTUP] scanner startup sync begin");
   if (!sm_scanner_run_startup_sync()) {
     log_debug("[STARTUP] scanner startup sync aborted");

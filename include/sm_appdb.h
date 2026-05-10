@@ -7,8 +7,12 @@ struct AppDbTitleList;
 
 // Close the cached app.db handle and release related resources.
 void shutdown_app_db(void);
+// Normalize existing snd0info rows during process startup.
+bool app_db_run_startup_maintenance(void);
 // Update snd0 metadata for a registered title.
 int update_snd0info(const char *title_id);
+// Normalize an existing snd0Info path for one title.
+int normalize_snd0info_for_title(const char *title_id);
 // Check whether a title ID exists in a cached app.db title list.
 bool app_db_title_list_contains(const struct AppDbTitleList *list,
                                 const char *title_id);

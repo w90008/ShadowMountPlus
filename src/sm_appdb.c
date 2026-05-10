@@ -11,14 +11,22 @@
 
 static sqlite3 *g_app_db;
 static sqlite3_stmt *g_app_db_stmt_update_snd0;
+static sqlite3_stmt *g_app_db_stmt_normalize_snd0;
 static struct AppDbTitleList g_app_db_title_cache;
 static bool g_app_db_title_cache_ready = false;
 static time_t g_app_db_title_cache_mtime = 0;
+
+#define APP_DB_STARTUP_MAINTENANCE_RETRIES 3
+#define APP_DB_STARTUP_MAINTENANCE_BUSY_TIMEOUT_MS 250
 
 static void close_app_db(void) {
   if (g_app_db_stmt_update_snd0) {
     sqlite3_finalize(g_app_db_stmt_update_snd0);
     g_app_db_stmt_update_snd0 = NULL;
+  }
+  if (g_app_db_stmt_normalize_snd0) {
+    sqlite3_finalize(g_app_db_stmt_normalize_snd0);
+    g_app_db_stmt_normalize_snd0 = NULL;
   }
   if (g_app_db) {
     sqlite3_close(g_app_db);
@@ -89,6 +97,111 @@ static int app_db_prepare_with_retry(const char *sql, sqlite3_stmt **stmt_out,
   return -1;
 }
 
+static bool app_db_exec_with_retry(const char *sql, int max_attempts,
+                                   const char *label, int *changes_out) {
+  if (changes_out)
+    *changes_out = 0;
+
+  for (int attempt = 0; attempt < max_attempts; attempt++) {
+    if (!ensure_app_db_open())
+      return false;
+
+    char *err_msg = NULL;
+    int rc = sqlite3_exec(g_app_db, sql, NULL, NULL, &err_msg);
+    if (rc == SQLITE_OK) {
+      if (changes_out)
+        *changes_out = sqlite3_changes(g_app_db);
+      sqlite3_free(err_msg);
+      return true;
+    }
+
+    if (app_db_wait_retry(rc, attempt, max_attempts, false)) {
+      sqlite3_free(err_msg);
+      continue;
+    }
+
+    if (err_msg) {
+      log_debug("  [DB] exec failed for %s: rc=%d err=%s", label, rc, err_msg);
+    } else {
+      log_debug("  [DB] exec failed for %s: rc=%d err=%s", label, rc,
+                sqlite3_errmsg(g_app_db));
+    }
+    sqlite3_free(err_msg);
+
+    close_app_db();
+    return false;
+  }
+
+  close_app_db();
+  return false;
+}
+
+static int app_db_query_int(const char *sql, const char *label) {
+  sqlite3_stmt *stmt = NULL;
+  int prep_rc = app_db_prepare_with_retry(sql, &stmt,
+                                          APP_DB_STARTUP_MAINTENANCE_RETRIES,
+                                          label);
+  if (prep_rc != SQLITE_OK)
+    return -1;
+
+  int result = -1;
+  for (int attempt = 0; attempt < APP_DB_QUERY_BUSY_RETRIES; attempt++) {
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW) {
+      result = sqlite3_column_int(stmt, 0);
+      break;
+    }
+    if (app_db_wait_retry(rc, attempt, APP_DB_QUERY_BUSY_RETRIES, false))
+      continue;
+
+    log_debug("  [DB] query failed for %s: rc=%d err=%s", label, rc,
+              sqlite3_errmsg(g_app_db));
+    break;
+  }
+
+  sqlite3_finalize(stmt);
+  return result;
+}
+
+bool app_db_run_startup_maintenance(void) {
+  if (!ensure_app_db_open())
+    return false;
+  (void)sqlite3_busy_timeout(g_app_db,
+                             APP_DB_STARTUP_MAINTENANCE_BUSY_TIMEOUT_MS);
+
+  const char *backfill_count_sql =
+      "SELECT COUNT(*) FROM tbl_contentinfo "
+      "WHERE instr(snd0Info, '/user/app/') > 0 "
+      "OR instr(snd0Info, '/sce_sys') > 0;";
+  int pending_backfill =
+      app_db_query_int(backfill_count_sql, "snd0info normalize backfill check");
+  if (pending_backfill < 0) {
+    close_app_db();
+    return false;
+  }
+
+  int changes = 0;
+  if (pending_backfill > 0) {
+    const char *backfill_sql =
+        "UPDATE tbl_contentinfo "
+        "SET snd0Info = replace(replace(snd0Info, '/user/app/', "
+        "'/user/appmeta/'), '/sce_sys', '') "
+        "WHERE instr(snd0Info, '/user/app/') > 0 "
+        "OR instr(snd0Info, '/sce_sys') > 0;";
+
+    if (!app_db_exec_with_retry(backfill_sql,
+                                APP_DB_STARTUP_MAINTENANCE_RETRIES,
+                                "snd0info startup normalize", &changes))
+      return false;
+  }
+
+  log_debug("  [DB] snd0info startup maintenance done rows=%d pending=%d",
+            changes, pending_backfill);
+
+  close_app_db();
+  return true;
+}
+
 int update_snd0info(const char *title_id) {
   if (!g_app_db_stmt_update_snd0) {
     const char *sql =
@@ -107,10 +220,8 @@ int update_snd0info(const char *title_id) {
     sqlite3_clear_bindings(g_app_db_stmt_update_snd0);
     if (sqlite3_bind_text(g_app_db_stmt_update_snd0, 1, title_id, -1,
                           SQLITE_TRANSIENT) != SQLITE_OK) {
-      if (g_app_db) {
-        log_debug("  [DB] bind failed for snd0info update: %s",
-                  sqlite3_errmsg(g_app_db));
-      }
+      log_debug("  [DB] bind failed for snd0info update: %s",
+                sqlite3_errmsg(g_app_db));
       close_app_db();
       return -1;
     }
@@ -125,10 +236,55 @@ int update_snd0info(const char *title_id) {
     if (app_db_wait_retry(rc, attempt, APP_DB_UPDATE_BUSY_RETRIES, false))
       continue;
 
-    if (g_app_db) {
-      log_debug("  [DB] step failed for snd0info update: rc=%d err=%s", rc,
+    log_debug("  [DB] step failed for snd0info update: rc=%d err=%s", rc,
+              sqlite3_errmsg(g_app_db));
+    close_app_db();
+    return -1;
+  }
+
+  close_app_db();
+  return -1;
+}
+
+int normalize_snd0info_for_title(const char *title_id) {
+  if (!g_app_db_stmt_normalize_snd0) {
+    const char *sql =
+        "UPDATE tbl_contentinfo "
+        "SET snd0Info = replace(replace(snd0Info, '/user/app/', "
+        "'/user/appmeta/'), '/sce_sys', '') "
+        "WHERE titleId = ?1 "
+        "AND (instr(snd0Info, '/user/app/') > 0 "
+        "OR instr(snd0Info, '/sce_sys') > 0);";
+    int prep_rc = app_db_prepare_with_retry(sql, &g_app_db_stmt_normalize_snd0,
+                                            APP_DB_PREPARE_BUSY_RETRIES,
+                                            "snd0info normalize");
+    if (prep_rc != SQLITE_OK)
+      return -1;
+  }
+
+  for (int attempt = 0; attempt < APP_DB_UPDATE_BUSY_RETRIES; attempt++) {
+    sqlite3_reset(g_app_db_stmt_normalize_snd0);
+    sqlite3_clear_bindings(g_app_db_stmt_normalize_snd0);
+    if (sqlite3_bind_text(g_app_db_stmt_normalize_snd0, 1, title_id, -1,
+                          SQLITE_TRANSIENT) != SQLITE_OK) {
+      log_debug("  [DB] bind failed for snd0info normalize: %s",
                 sqlite3_errmsg(g_app_db));
+      close_app_db();
+      return -1;
     }
+
+    int rc = sqlite3_step(g_app_db_stmt_normalize_snd0);
+    if (rc == SQLITE_DONE) {
+      int changes = sqlite3_changes(g_app_db);
+      close_app_db();
+      return changes;
+    }
+
+    if (app_db_wait_retry(rc, attempt, APP_DB_UPDATE_BUSY_RETRIES, false))
+      continue;
+
+    log_debug("  [DB] step failed for snd0info normalize: rc=%d err=%s", rc,
+              sqlite3_errmsg(g_app_db));
     close_app_db();
     return -1;
   }
@@ -176,26 +332,23 @@ static bool load_app_db_title_list(struct AppDbTitleList *list) {
       "WHERE titleId != '' "
       "ORDER BY titleId;";
   sqlite3_stmt *stmt = NULL;
-  int prep_rc = app_db_prepare_with_retry(sql, &stmt, APP_DB_PREPARE_BUSY_RETRIES,
+  int prep_rc = app_db_prepare_with_retry(sql, &stmt,
+                                          APP_DB_PREPARE_BUSY_RETRIES,
                                           "title list query");
-  if (prep_rc != SQLITE_OK) {
-    close_app_db();
+  if (prep_rc != SQLITE_OK)
     return false;
-  }
 
   int busy_attempts = 0;
   while (!should_stop_requested()) {
     int rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
       const char *title_id = (const char *)sqlite3_column_text(stmt, 0);
-      if (title_id && title_id[0] != '\0') {
-        if (!append_app_db_title(list, title_id)) {
-          log_debug("  [DB] title list allocation failed");
-          sqlite3_finalize(stmt);
-          close_app_db();
-          free_app_db_title_list(list);
-          return false;
-        }
+      if (!append_app_db_title(list, title_id)) {
+        log_debug("  [DB] title list allocation failed");
+        sqlite3_finalize(stmt);
+        close_app_db();
+        free_app_db_title_list(list);
+        return false;
       }
       continue;
     }
@@ -213,7 +366,7 @@ static bool load_app_db_title_list(struct AppDbTitleList *list) {
     }
 
     log_debug("  [DB] title list query failed: rc=%d err=%s", rc,
-              (g_app_db ? sqlite3_errmsg(g_app_db) : "unknown"));
+              sqlite3_errmsg(g_app_db));
     sqlite3_finalize(stmt);
     close_app_db();
     free_app_db_title_list(list);

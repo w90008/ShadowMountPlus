@@ -6,6 +6,7 @@
 #include <sys/event.h>
 #include <sys/select.h>
 
+#include "sm_appdb.h"
 #include "sm_fakelib.h"
 #include "sm_game_lifecycle.h"
 #include "sm_kstuff.h"
@@ -38,6 +39,8 @@ static pthread_cond_t g_game_lifecycle_start_cond = PTHREAD_COND_INITIALIZER;
 static bool g_game_lifecycle_start_ready = false;
 static bool g_game_lifecycle_start_success = false;
 static _Atomic pid_t g_active_game_pid = 0;
+static pthread_mutex_t g_active_game_mutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_active_game_title_id[MAX_TITLE_ID];
 
 static bool register_game_exit_watch(int kq, pid_t pid);
 
@@ -46,6 +49,32 @@ static void publish_active_game_pid(pid_t pid) {
   if (previous_pid == pid)
     return;
   sm_scanner_wake();
+}
+
+static void publish_active_game(pid_t pid, const char *title_id) {
+  pthread_mutex_lock(&g_active_game_mutex);
+  if (pid > 0 && title_id && title_id[0] != '\0')
+    (void)strlcpy(g_active_game_title_id, title_id,
+                  sizeof(g_active_game_title_id));
+  else
+    g_active_game_title_id[0] = '\0';
+  pthread_mutex_unlock(&g_active_game_mutex);
+  publish_active_game_pid(pid);
+}
+
+static bool consume_active_game_title(pid_t pid,
+                                      char title_id_out[MAX_TITLE_ID]) {
+  bool matched = false;
+  pthread_mutex_lock(&g_active_game_mutex);
+  if (pid > 0 && atomic_load(&g_active_game_pid) == pid &&
+      g_active_game_title_id[0] != '\0') {
+    (void)strlcpy(title_id_out, g_active_game_title_id, MAX_TITLE_ID);
+    matched = true;
+  }
+  if (matched)
+    g_active_game_title_id[0] = '\0';
+  pthread_mutex_unlock(&g_active_game_mutex);
+  return matched;
 }
 
 static bool is_supported_title_id(const char *title_id) {
@@ -145,7 +174,7 @@ static bool dispatch_game_launch(int kq, pid_t pid, uint64_t exec_time_us,
 
   log_debug("  [GAME] started: %s pid=%ld app_id=0x%08X", title_id,
             (long)pid, app_id);
-  publish_active_game_pid(pid);
+  publish_active_game(pid, title_id);
   sm_kstuff_game_on_exec(pid, title_id, app_id, exec_time_us);
   sm_fakelib_game_on_exec(pid, title_id);
   return true;
@@ -392,6 +421,8 @@ static void handle_game_exec(int kq, pid_t pid) {
 }
 
 static void handle_game_exit(pid_t pid) {
+  char title_id[MAX_TITLE_ID] = {0};
+  bool had_active_title = consume_active_game_title(pid, title_id);
   pending_game_launch_t *entry = find_pending_game_launch(pid);
   if (entry)
     clear_pending_game_launch(entry);
@@ -399,6 +430,12 @@ static void handle_game_exit(pid_t pid) {
     publish_active_game_pid(0);
   sm_fakelib_game_on_exit(pid);
   sm_kstuff_game_on_exit(pid);
+  if (had_active_title) {
+    int snd0_updates = normalize_snd0info_for_title(title_id);
+    if (snd0_updates >= 0)
+      log_debug("  [DB] snd0info normalized after game exit rows=%d title=%s",
+                snd0_updates, title_id);
+  }
 }
 
 static void restore_suspended_game_if_alive(int kq, pid_t pid) {
@@ -467,7 +504,7 @@ static void *game_lifecycle_watcher_main(void *arg) {
         clear_all_pending_game_launches();
         sm_fakelib_game_shutdown();
         sm_kstuff_game_shutdown();
-        publish_active_game_pid(0);
+        publish_active_game(0, NULL);
         sleep_cleanup_done = true;
       }
 
@@ -527,7 +564,7 @@ static void *game_lifecycle_watcher_main(void *arg) {
   clear_all_pending_game_launches();
   sm_fakelib_game_shutdown();
   sm_kstuff_game_shutdown();
-  publish_active_game_pid(0);
+  publish_active_game(0, NULL);
   close(kq);
   log_debug("  [GAME] lifecycle watcher stopped");
   return NULL;
@@ -600,7 +637,7 @@ void stop_game_lifecycle_watcher(void) {
   (void)pthread_join(g_game_lifecycle_thread, NULL);
   g_game_lifecycle_thread_started = false;
   g_game_lifecycle_stop_requested = 0;
-  publish_active_game_pid(0);
+  publish_active_game(0, NULL);
   close_game_lifecycle_wake_pipe();
 }
 
