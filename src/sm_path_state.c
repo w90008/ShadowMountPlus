@@ -13,6 +13,7 @@ struct PathStateEntry {
   bool missing_param_limit_logged;
   bool image_mount_limit_logged;
   bool backport_mount_blocked;
+  bool manual_missing_source_logged;
   bool game_info_cached;
   bool game_info_valid;
   time_t game_info_mtime;
@@ -69,7 +70,8 @@ static struct PathStateEntry *create_path_state(const char *path) {
     for (int k = 0; k < PATH_STATE_CAPACITY; k++) {
       if (!g_path_state[k].valid)
         continue;
-      if (!path_exists(g_path_state[k].path)) {
+      if (!path_exists(g_path_state[k].path) &&
+          !g_path_state[k].manual_missing_source_logged) {
         evict_k = k;
         break;
       }
@@ -81,6 +83,7 @@ static struct PathStateEntry *create_path_state(const char *path) {
         if (g_path_state[k].missing_param_attempts == 0 &&
             g_path_state[k].image_mount_attempts == 0 &&
             !g_path_state[k].backport_mount_blocked &&
+            !g_path_state[k].manual_missing_source_logged &&
             !g_path_state[k].game_info_cached) {
           evict_k = k;
           break;
@@ -160,6 +163,8 @@ void prune_path_state(void) {
       continue;
     if (path_exists(g_path_state[k].path))
       continue;
+    if (g_path_state[k].manual_missing_source_logged)
+      continue;
     memset(&g_path_state[k], 0, sizeof(g_path_state[k]));
     changed = true;
   }
@@ -180,6 +185,8 @@ void prune_path_state_for_root(const char *root) {
     if (!path_matches_root_or_child(g_path_state[k].path, root))
       continue;
     if (path_exists(g_path_state[k].path))
+      continue;
+    if (g_path_state[k].manual_missing_source_logged)
       continue;
     memset(&g_path_state[k], 0, sizeof(g_path_state[k]));
     changed = true;
@@ -277,4 +284,23 @@ void clear_backport_mount_failure(const char *path) {
   if (!entry)
     return;
   entry->backport_mount_blocked = false;
+}
+
+bool note_manual_missing_source_once(const char *path) {
+  if (!path || path[0] == '\0')
+    return false;
+  struct PathStateEntry *entry = get_or_create_path_state(path);
+  if (!entry || entry->manual_missing_source_logged)
+    return false;
+  entry->manual_missing_source_logged = true;
+  return true;
+}
+
+void clear_manual_missing_source(const char *path) {
+  if (!path || path[0] == '\0')
+    return;
+  struct PathStateEntry *entry = find_path_state(path);
+  if (!entry)
+    return;
+  entry->manual_missing_source_logged = false;
 }

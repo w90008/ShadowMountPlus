@@ -181,6 +181,44 @@ Default scan locations:
 
 You can override scan roots with `scanpath=...` entries in `/data/shadowmount/config.ini`.
 
+## Manual install list
+
+For games that should not live under the normal scan paths, ShadowMountPlus also
+checks:
+
+`/data/shadowmount/manual.lst`
+
+Add one source per line:
+- Path to a game folder, where `sce_sys/param.json` exists inside that folder.
+- Path to a supported image file: `.ffpkg`, `.exfat`, or `.ffpfs`.
+- Empty lines and lines starting with `#` are ignored.
+
+Example:
+```text
+/mnt/usb0/MyGames/PPSA12345
+/mnt/usb0/images/PPSA54321.ffpkg
+# /mnt/usb0/disabled/PPSA00000
+```
+
+`manual.lst` is watched for changes. When you add a new line, ShadowMountPlus
+rescans shortly after the write, mounts images when needed, and installs the
+game through the same pipeline as normal scan path discoveries.
+
+Manual install state is tracked in:
+
+`/data/shadowmount/manual.status`
+
+This status file is managed by ShadowMountPlus. If a manually installed game is
+later removed by the user and disappears from `app.db`, ShadowMountPlus marks it
+as deleted in `manual.status` and removes the matching source line from
+`manual.lst` so it is not installed again automatically. If you later add the
+same source path back to `manual.lst`, it will be processed again and the status
+will be updated after installation.
+
+You can use **Dump Installer** to install or prepare game dumps for this manual
+workflow, then add the resulting game folder path or image file path to
+`manual.lst`.
+
 Recommended folder structure:
 - Default mode (`scan_depth=1`):
   - `/data/homebrew/<TITLE_ID>/`

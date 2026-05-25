@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-// Initialize scanner service resources such as wake pipe and control-dir watch.
+// Initialize scanner service resources such as wake pipe and file watches.
 bool sm_scanner_init(void);
 // Wake a blocked scanner wait. Safe to call from signal context.
 void sm_scanner_wake(void);

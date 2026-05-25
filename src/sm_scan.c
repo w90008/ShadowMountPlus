@@ -18,6 +18,7 @@
 #include "sm_image_cache.h"
 #include "sm_image.h"
 #include "sm_install_queue.h"
+#include "sm_manual.h"
 
 typedef struct {
   char discovered_param_roots[MAX_PENDING][MAX_PATH];
@@ -85,10 +86,12 @@ typedef enum {
 
 static directory_candidate_probe_t probe_directory_candidate(
     const char *full_path, char discovered_param_roots[][MAX_PATH],
-    int *discovered_param_root_count, directory_candidate_info_t *info_out) {
+    int *discovered_param_root_count, bool allow_known_param_root,
+    directory_candidate_info_t *info_out) {
   struct stat param_st;
 
-  if (is_under_discovered_param_root(full_path, discovered_param_roots,
+  if (!allow_known_param_root &&
+      is_under_discovered_param_root(full_path, discovered_param_roots,
                                      *discovered_param_root_count)) {
     return DIRECTORY_CANDIDATE_SKIP_DESCEND;
   }
@@ -114,7 +117,9 @@ static directory_candidate_probe_t probe_directory_candidate(
     return DIRECTORY_CANDIDATE_SKIP_DESCEND;
   }
 
-  if (*discovered_param_root_count < MAX_PENDING) {
+  if (*discovered_param_root_count < MAX_PENDING &&
+      !is_under_discovered_param_root(full_path, discovered_param_roots,
+                                      *discovered_param_root_count)) {
     (void)strlcpy(discovered_param_roots[*discovered_param_root_count], full_path,
                   MAX_PATH);
     (*discovered_param_root_count)++;
@@ -131,6 +136,16 @@ static int find_scan_candidate_index_by_title_id(scan_candidate_t *candidates,
       return i;
   }
   return -1;
+}
+
+static void mark_scan_candidate_manual(scan_candidate_t *candidate,
+                                       const char *manual_source_path) {
+  if (!candidate || !manual_source_path || manual_source_path[0] == '\0')
+    return;
+
+  candidate->manual = true;
+  (void)strlcpy(candidate->manual_source_path, manual_source_path,
+                sizeof(candidate->manual_source_path));
 }
 
 static void remove_scan_candidate_at(scan_candidate_t *candidates,
@@ -209,7 +224,8 @@ static existing_directory_result_t handle_existing_directory_candidate(
 static bool enqueue_directory_candidate(
     const char *full_path, scan_candidate_t *candidates, int max_candidates,
     int *candidate_count, const directory_candidate_info_t *info, bool installed,
-    bool in_app_db, bool *unstable_found_out) {
+    bool in_app_db, const char *manual_source_path,
+    bool *unstable_found_out) {
   char metadata_path[MAX_PATH];
   uint8_t failed_attempts = get_failed_mount_attempts(info->title_id);
   if (failed_attempts >= MAX_FAILED_MOUNT_ATTEMPTS) {
@@ -247,8 +263,11 @@ static bool enqueue_directory_candidate(
                 sizeof(candidates[*candidate_count].title_id));
   (void)strlcpy(candidates[*candidate_count].title_name, info->title_name,
                 sizeof(candidates[*candidate_count].title_name));
+  candidates[*candidate_count].manual_source_path[0] = '\0';
   candidates[*candidate_count].installed = installed;
   candidates[*candidate_count].in_app_db = in_app_db;
+  candidates[*candidate_count].manual = false;
+  mark_scan_candidate_manual(&candidates[*candidate_count], manual_source_path);
   (*candidate_count)++;
   return true;
 }
@@ -257,11 +276,13 @@ static bool try_collect_candidate_for_directory(
     const char *full_path, scan_candidate_t *candidates, int max_candidates,
     int *candidate_count, const struct AppDbTitleList *app_db_titles,
     bool app_db_titles_ready, char discovered_param_roots[][MAX_PATH],
-    int *discovered_param_root_count, bool *unstable_found_out) {
+    int *discovered_param_root_count, bool allow_known_param_root,
+    const char *manual_source_path, bool *unstable_found_out) {
   directory_candidate_info_t info;
   directory_candidate_probe_t probe_result =
       probe_directory_candidate(full_path, discovered_param_roots,
-                                discovered_param_root_count, &info);
+                                discovered_param_root_count,
+                                allow_known_param_root, &info);
 
   if (probe_result == DIRECTORY_CANDIDATE_SKIP_DESCEND)
     return true;
@@ -284,6 +305,9 @@ static bool try_collect_candidate_for_directory(
                                           &installed, &in_app_db,
                                           preferred_existing_path);
   if (existing_result == EXISTING_DIRECTORY_PREFER_CURRENT) {
+    if (manual_source_path)
+      sm_manual_note_installed(manual_source_path, info.title_id,
+                               info.title_name);
     if (duplicate_candidate_index >= 0) {
       if (!duplicate_candidate_same_path)
         notify_duplicate_scan_candidate(info.title_id, duplicate_candidate_path,
@@ -305,6 +329,9 @@ static bool try_collect_candidate_for_directory(
     if (duplicate_candidate_index >= 0 && !duplicate_candidate_same_path)
       notify_duplicate_scan_candidate(info.title_id, full_path,
                                       duplicate_candidate_path);
+    if (duplicate_candidate_index >= 0)
+      mark_scan_candidate_manual(&candidates[duplicate_candidate_index],
+                                 manual_source_path);
     return true;
   }
 
@@ -312,12 +339,15 @@ static bool try_collect_candidate_for_directory(
     if (!duplicate_candidate_same_path)
       notify_duplicate_scan_candidate(info.title_id, full_path,
                                       duplicate_candidate_path);
+    mark_scan_candidate_manual(&candidates[duplicate_candidate_index],
+                               manual_source_path);
     return true;
   }
 
   return enqueue_directory_candidate(full_path, candidates, max_candidates,
                                      candidate_count, &info, installed,
-                                     in_app_db, unstable_found_out);
+                                     in_app_db, manual_source_path,
+                                     unstable_found_out);
 }
 
 typedef struct {
@@ -328,6 +358,7 @@ typedef struct {
   bool app_db_titles_ready;
   char (*discovered_param_roots)[MAX_PATH];
   int *discovered_param_root_count;
+  const char *manual_source_path;
   bool *unstable_found_out;
 } collect_candidates_walk_ctx_t;
 
@@ -341,7 +372,7 @@ static sm_scan_tree_dir_visit_t collect_candidate_directory_visit(
           dir_path, ctx->candidates, ctx->max_candidates, ctx->candidate_count,
           ctx->app_db_titles, ctx->app_db_titles_ready,
           ctx->discovered_param_roots, ctx->discovered_param_root_count,
-          ctx->unstable_found_out)) {
+          false, ctx->manual_source_path, ctx->unstable_found_out)) {
     return SM_SCAN_TREE_DIR_SKIP_DESCEND;
   }
 
@@ -356,6 +387,126 @@ static bool collect_candidate_image_visit(const char *image_path,
 
   collect_candidates_walk_ctx_t *ctx = (collect_candidates_walk_ctx_t *)ctx_ptr;
   maybe_mount_image_file(image_path, image_name, ctx->unstable_found_out);
+  return true;
+}
+
+static void collect_scan_candidates_from_manual_root(
+    const char *scan_path, const char *manual_source_path,
+    scan_candidate_t *candidates, int max_candidates, int *candidate_count,
+    const struct AppDbTitleList *app_db_titles, bool app_db_titles_ready,
+    char discovered_param_roots[][MAX_PATH], int *discovered_param_root_count,
+    bool *unstable_found_out) {
+  if (should_stop_requested() || runtime_sleep_mode_active())
+    return;
+
+  bool try_root_candidate = true;
+  if (is_under_image_mount_base(scan_path)) {
+    struct stat param_st;
+    try_root_candidate = directory_has_param_json(scan_path, &param_st);
+  }
+
+  if (try_root_candidate) {
+    if (try_collect_candidate_for_directory(
+            scan_path, candidates, max_candidates, candidate_count,
+            app_db_titles, app_db_titles_ready, discovered_param_roots,
+            discovered_param_root_count, true, manual_source_path,
+            unstable_found_out)) {
+      return;
+    }
+  }
+
+  unsigned int scan_depth = runtime_config()->scan_depth;
+  if (scan_depth < MIN_SCAN_DEPTH)
+    scan_depth = MIN_SCAN_DEPTH;
+
+  collect_candidates_walk_ctx_t ctx = {
+      .candidates = candidates,
+      .max_candidates = max_candidates,
+      .candidate_count = candidate_count,
+      .app_db_titles = app_db_titles,
+      .app_db_titles_ready = app_db_titles_ready,
+      .discovered_param_roots = discovered_param_roots,
+      .discovered_param_root_count = discovered_param_root_count,
+      .manual_source_path = manual_source_path,
+      .unstable_found_out = unstable_found_out,
+  };
+  sm_scan_tree_callbacks_t callbacks = {
+      .on_directory = collect_candidate_directory_visit,
+      .on_image_file = NULL,
+  };
+  (void)sm_scan_tree_walk(scan_path, scan_path, 0u, scan_depth, &callbacks, &ctx);
+}
+
+static void collect_scan_candidates_from_manual_path(
+    const char *manual_path, scan_candidate_t *candidates, int max_candidates,
+    int *candidate_count, const struct AppDbTitleList *app_db_titles,
+    bool app_db_titles_ready, char discovered_param_roots[][MAX_PATH],
+    int *discovered_param_root_count, bool *unstable_found_out) {
+  if (should_stop_requested() || runtime_sleep_mode_active())
+    return;
+
+  struct stat st;
+  if (stat(manual_path, &st) != 0) {
+    if (note_manual_missing_source_once(manual_path))
+      log_debug("  [MANUAL] source unavailable: %s", manual_path);
+    return;
+  }
+  clear_manual_missing_source(manual_path);
+
+  const char *name = get_filename_component(manual_path);
+  if (S_ISREG(st.st_mode) && is_supported_image_file_name(name)) {
+    maybe_mount_image_file(manual_path, name, unstable_found_out);
+
+    char mount_point[MAX_PATH];
+    get_image_mount_point_for_source(manual_path, mount_point);
+    collect_scan_candidates_from_manual_root(
+        mount_point, manual_path, candidates, max_candidates, candidate_count,
+        app_db_titles, app_db_titles_ready, discovered_param_roots,
+        discovered_param_root_count, unstable_found_out);
+    return;
+  }
+
+  struct stat param_st;
+  if (!S_ISDIR(st.st_mode) || !directory_has_param_json(manual_path, &param_st)) {
+    log_debug("  [MANUAL] expected game directory or image file: %s",
+              manual_path);
+    return;
+  }
+
+  collect_scan_candidates_from_manual_root(
+      manual_path, manual_path, candidates, max_candidates, candidate_count,
+      app_db_titles, app_db_titles_ready, discovered_param_roots,
+      discovered_param_root_count, unstable_found_out);
+}
+
+typedef struct {
+  scan_candidate_t *candidates;
+  int max_candidates;
+  int *candidate_count;
+  const struct AppDbTitleList *app_db_titles;
+  bool app_db_titles_ready;
+  char (*discovered_param_roots)[MAX_PATH];
+  int *discovered_param_root_count;
+  bool *unstable_found_out;
+  int path_count;
+} manual_scan_ctx_t;
+
+static bool collect_manual_path_visit(const char *manual_path, void *ctx_ptr) {
+  manual_scan_ctx_t *ctx = (manual_scan_ctx_t *)ctx_ptr;
+  if (should_stop_requested() || runtime_sleep_mode_active())
+    return false;
+  if (*ctx->candidate_count >= ctx->max_candidates) {
+    log_debug("  [MANUAL] candidate queue full (%d), remaining sources deferred",
+              ctx->max_candidates);
+    return false;
+  }
+
+  ctx->path_count++;
+  collect_scan_candidates_from_manual_path(
+      manual_path, ctx->candidates, ctx->max_candidates, ctx->candidate_count,
+      ctx->app_db_titles, ctx->app_db_titles_ready,
+      ctx->discovered_param_roots, ctx->discovered_param_root_count,
+      ctx->unstable_found_out);
   return true;
 }
 
@@ -519,6 +670,7 @@ static void collect_scan_candidates_from_root(
       .app_db_titles_ready = app_db_titles_ready,
       .discovered_param_roots = discovered_param_roots,
       .discovered_param_root_count = discovered_param_root_count,
+      .manual_source_path = NULL,
       .unstable_found_out = unstable_found_out,
   };
   sm_scan_tree_callbacks_t callbacks = {
@@ -526,6 +678,35 @@ static void collect_scan_candidates_from_root(
       .on_image_file = collect_candidate_image_visit,
   };
   (void)sm_scan_tree_walk(scan_path, scan_path, 0u, scan_depth, &callbacks, &ctx);
+}
+
+static void collect_scan_candidates_from_manual_list(
+    scan_candidate_t *candidates, int max_candidates, int *candidate_count,
+    const struct AppDbTitleList *app_db_titles, bool app_db_titles_ready,
+    char discovered_param_roots[][MAX_PATH], int *discovered_param_root_count,
+    bool *unstable_found_out) {
+  if (should_stop_requested() || runtime_sleep_mode_active())
+    return;
+
+  (void)sm_manual_reconcile_deleted_titles(app_db_titles, app_db_titles_ready);
+
+  manual_scan_ctx_t ctx = {
+      .candidates = candidates,
+      .max_candidates = max_candidates,
+      .candidate_count = candidate_count,
+      .app_db_titles = app_db_titles,
+      .app_db_titles_ready = app_db_titles_ready,
+      .discovered_param_roots = discovered_param_roots,
+      .discovered_param_root_count = discovered_param_root_count,
+      .unstable_found_out = unstable_found_out,
+      .path_count = 0,
+  };
+  if (!sm_manual_for_each_path(collect_manual_path_visit, &ctx) ||
+      ctx.path_count <= 0) {
+    return;
+  }
+
+  log_debug("  [MANUAL] scanned %d manual source(s)", ctx.path_count);
 }
 
 int collect_scan_candidates_for_scan_root(const char *scan_root,
@@ -578,6 +759,11 @@ int collect_scan_candidates(scan_candidate_t *candidates, int max_candidates,
                                       &discovered_param_root_count,
                                       unstable_found_out);
   }
+
+  collect_scan_candidates_from_manual_list(
+      candidates, max_candidates, &candidate_count, &app_db_titles,
+      app_db_titles_ready, g_scan_workspace.discovered_param_roots,
+      &discovered_param_root_count, unstable_found_out);
 
   if (total_found_out)
     *total_found_out = discovered_param_root_count;

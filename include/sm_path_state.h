@@ -34,5 +34,9 @@ bool is_backport_mount_blocked(const char *path);
 void note_backport_mount_failure(const char *path);
 // Clear failed backport overlay mount state for a path.
 void clear_backport_mount_failure(const char *path);
+// Return true once for a missing manual source until the path appears again.
+bool note_manual_missing_source_once(const char *path);
+// Allow a manual source to be reported missing again after it becomes visible.
+void clear_manual_missing_source(const char *path);
 
 #endif

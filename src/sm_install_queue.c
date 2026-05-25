@@ -7,6 +7,7 @@
 #include "sm_game_cache.h"
 #include "sm_limits.h"
 #include "sm_log.h"
+#include "sm_manual.h"
 #include "sm_runtime.h"
 #include "sm_time.h"
 #include "sm_title_state.h"
@@ -25,8 +26,10 @@ typedef struct {
   char title_id[MAX_TITLE_ID];
   char title_name[MAX_TITLE_NAME];
   char source_path[MAX_PATH];
+  char manual_source_path[MAX_PATH];
   uint64_t requested_at_us;
   bool has_src_snd0;
+  bool manual;
   install_track_state_t state;
 } pending_install_entry_t;
 
@@ -189,6 +192,9 @@ bool sm_install_queue_candidate(const scan_candidate_t *candidate,
   (void)strlcpy(entry->title_name, candidate->title_name,
                 sizeof(entry->title_name));
   (void)strlcpy(entry->source_path, candidate->path, sizeof(entry->source_path));
+  (void)strlcpy(entry->manual_source_path, candidate->manual_source_path,
+                sizeof(entry->manual_source_path));
+  entry->manual = candidate->manual;
   entry->has_src_snd0 = has_src_snd0;
   entry->state = INSTALL_TRACK_QUEUED;
   if (previous_state == INSTALL_TRACK_NONE)
@@ -213,6 +219,9 @@ static void finalize_pending_install_success(pending_install_entry_t *entry) {
       log_debug("  [DB] snd0info updated rows=%d", snd0_updates);
   }
   cache_game_entry(entry->source_path, entry->title_id, entry->title_name);
+  if (entry->manual)
+    sm_manual_note_installed(entry->manual_source_path, entry->title_id,
+                             entry->title_name);
   clear_failed_mount_attempts(entry->title_id);
   clear_pending_install_entry(entry);
 }

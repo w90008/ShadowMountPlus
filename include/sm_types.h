@@ -89,8 +89,10 @@ typedef struct scan_candidate {
   char path[MAX_PATH];
   char title_id[MAX_TITLE_ID];
   char title_name[MAX_TITLE_NAME];
+  char manual_source_path[MAX_PATH];
   bool installed;
   bool in_app_db;
+  bool manual;
 } scan_candidate_t;
 
 typedef enum {

@@ -13,6 +13,7 @@
 #include "sm_title_state.h"
 #include "sm_image_cache.h"
 #include "sm_paths.h"
+#include "sm_manual.h"
 
 #include <dlfcn.h>
 
@@ -368,6 +369,10 @@ void process_scan_candidates(const scan_candidate_t *candidates,
       return;
 
     if (mounted) {
+      if (c->manual && !use_app_install_all) {
+        sm_manual_note_installed(c->manual_source_path, c->title_id,
+                                 c->title_name);
+      }
       if (use_app_install_all) {
         if (!sm_install_queue_candidate(c, has_src_snd0)) {
           log_debug("  [REG] Failed to queue staged install: %s (%s)",

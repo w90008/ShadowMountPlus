@@ -239,6 +239,11 @@ static void build_image_mount_point(const char *file_path,
   snprintf(mount_point, MAX_PATH, "%s/%s", IMAGE_MOUNT_BASE, mount_name);
 }
 
+void get_image_mount_point_for_source(const char *file_path,
+                                      char mount_point[MAX_PATH]) {
+  build_image_mount_point(file_path, mount_point);
+}
+
 typedef bool (*image_attach_fn)(const char *file_path, image_fs_type_t fs_type,
                                 bool mount_read_only, off_t file_size,
                                 int *unit_id_out, char *devname_out,

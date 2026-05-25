@@ -24,6 +24,9 @@ void cleanup_mount_dirs(void);
 // Mount an image file if it is stable and not currently rate-limited.
 void maybe_mount_image_file(const char *full_path, const char *name,
                             bool *unstable_out);
+// Build the deterministic runtime mount point for an image source path.
+void get_image_mount_point_for_source(const char *file_path,
+                                      char mount_point[MAX_PATH]);
 // Return true when the filename has a supported image extension.
 bool is_supported_image_file_name(const char *name);
 
