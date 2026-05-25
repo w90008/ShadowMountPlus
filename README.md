@@ -11,7 +11,7 @@
 **Compatibility:** Supports all Jailbroken PS5 firmwares running **[Kstuff-lite v1.05+](https://github.com/EchoStretch/kstuff-lite)**.
 
 
-**💜 Support Development**
+## 💜 Support Development
 
  If you want to support this project, you can donate
  - USDT (TRC-20):  **`TKaUGEwMm9KBXzEoiaaKYBX2yCHAKASW3p`**
