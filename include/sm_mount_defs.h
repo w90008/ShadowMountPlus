@@ -42,7 +42,7 @@
 // Raw option bits are normalized by sceFsLvdAttachCommon before validation:
 // raw:0x1->norm:0x08, raw:0x2->norm:0x80, raw:0x4->norm:0x02, raw:0x8->norm:0x10.
 // The normalized masks are then checked against validator constraints (0x82/0x92).
-#define LVD_ATTACH_IMAGE_TYPE_SINGLE 1
+#define LVD_ATTACH_IMAGE_TYPE_SINGLE 0
 #define LVD_ATTACH_IMAGE_TYPE_UFS_DOWNLOAD_DATA 7
 #define LVD_ATTACH_IMAGE_TYPE_PFS_SAVE_DATA 5
 #define LVD_ATTACH_LAYER_COUNT 1
