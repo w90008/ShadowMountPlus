@@ -182,7 +182,7 @@ static bool send_rich_notification(const char *message) {
       "        \"body\": \"%s\"\n"
       "      },\n"
       "      \"subMessage\": {\n"
-      "        \"body\": \"ShadowMountPlus %s\"\n"
+      "        \"body\": \"محمد خالد للشروحات - ShadowMountPlus %s\"\n"
       "      },\n"
       "      \"actions\": [\n"
       "        {\n"
