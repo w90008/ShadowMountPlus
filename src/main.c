@@ -483,7 +483,7 @@ int main(void) {
     log_debug("  [MOUNT] remount_system_ex failed: %s", strerror(errno));
   }
 
-  notify_system("ShadowMount+ v%s exFAT/UFS/PFS", SHADOWMOUNT_VERSION);
+  notify_system("محمد خالد للشروحات - ShadowMount+ v%s", SHADOWMOUNT_VERSION);
   log_non_empty_scan_paths();
 
   if (runtime_config()->legacy_recursive_scan_forced) {
